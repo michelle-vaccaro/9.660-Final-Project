@@ -1,0 +1,224 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
+
+```{r}
+library(rstan)
+```
+
+Load data
+```{r}
+survey_data_path <- "Data/survey_data_cleaned_seq.csv"
+df_data <- read.csv(survey_data_path)
+```
+
+```{r}
+model <- "
+// Retention With Structured Individual Differences
+data { 
+  int ns;
+  int nt;
+  real<lower=0, upper=1> k[ns, nt];
+  real<lower=0, upper=1> mu_prior[ns, nt];
+  real<lower=0, upper=100> conf_prior[ns, nt];
+  real<lower=0, upper=1> ai_pred[nt];
+  real<lower=0> time[ns];
+}
+parameters {
+  vector<lower=-10, upper=10>[ns] alpha;
+  vector<lower=-20, upper=20>[ns] beta1;
+  vector<lower=-20, upper=20>[ns] beta2;
+
+  real<lower=-5, upper=5> alpha_mu;
+  real<lower=.001> alpha_sigma;
+  real<lower=-10, upper=10> beta1_mu;
+  real<lower=.001> beta1_sigma;
+  real<lower=-10, upper=10> beta2_mu;
+  real<lower=.001> beta2_sigma;
+  vector<lower=0, upper=.25>[nt] sigma_prior_mu;
+  vector<lower=.001, upper=.25>[nt] sigma_prior_sigma;
+} 
+transformed parameters {
+  matrix<lower=0, upper=1>[ns,nt] mu_post;
+  matrix<lower=.001>[ns, nt] sigma_prior;
+  matrix<lower=.001>[ns, nt] sigma_post;
+  matrix<lower=.001, upper=1>[ns, nt] conf;
+  matrix<lower=0, upper=1>[ns, nt] I;
+
+  // Linear combination of prior belief and algorithmic suggestion
+  for (i in 1:ns) {
+    for (j in 1:nt) {
+      sigma_prior[i,j] = ai_pred[j] / 10 * (101 - conf_prior[i,j]);
+      I[i, j] = inv_logit(alpha[i] + beta1[i]*conf_prior[i,j] + beta2[i]*time[i]);
+      conf[i, j] = sqrt(fabs(mu_prior[i,j] - ai_pred[j])+0.01);
+      mu_post[i,j] = ai_pred[j]*I[i, j] + mu_prior[i,j]*(1-I[i, j]);
+      sigma_post[i,j] = sigma_prior[i, j] * (1 - conf[i, j]); 
+    }
+  }
+}
+
+model {
+  // Priors For Group Distributions
+  alpha_mu ~ normal(0, 2); 
+  beta1_mu ~ normal(0, 2); 
+  beta2_mu ~ normal(0, 2); 
+  
+  alpha_sigma ~ gamma(1, .1)T[.001,];
+  beta1_sigma ~ gamma(1, .1)T[.001,];
+  beta2_sigma ~ gamma(1, .1)T[.001,];
+  
+  for (i in 1:ns)  {
+    alpha[i] ~ normal(alpha_mu, alpha_sigma);
+    beta1[i] ~ normal(beta1_mu, beta1_sigma);
+    beta2[i] ~ normal(beta2_mu, beta2_sigma);
+  }
+
+  // Observed Data
+  for (i in 1:(ns - 1)) {
+    for (j in 1:(nt - 1)) {
+      k[i,j] ~ normal(mu_post[i,j], sigma_post[i,j]);
+    }
+  }
+}
+generated quantities {
+  matrix<lower=0>[ns,nt] m_post;
+  matrix<lower=0>[ns,nt] sd_prior;
+  matrix<lower=0>[ns,nt] sd_post;
+  matrix<lower=0, upper=1>[ns,nt] infl;
+  
+  // Predicted Data
+  for (i in 1:ns) {
+    for (j in 1:nt) {
+      infl[i, j] = I[i,j];
+      m_post[i,j] = mu_post[i,j];
+      sd_prior[i,j] = sigma_prior[i,j];
+      sd_post[i,j] = sigma_post[i,j];
+    }
+  }
+}"
+
+ai_pred <- c(0.44, 0.68, 0.94, 0.22)
+nt <- length(ai_pred)
+slist <- 1:14
+ns    <- length(slist)
+
+mu_prior1 <- cbind(df_data$F1_5, df_data$F2_5, df_data$F3_5, df_data$F4_5)
+conf_prior1 <- cbind(df_data$F1_5, df_data$F2_5, df_data$F3_5, df_data$F4_5)
+time1 = df_data$Duration..in.seconds.
+
+k1 <- cbind(df_data$F1_AI_5, df_data$F2_AI_5, df_data$F3_AI_5, df_data$F4_AI_5)
+
+mu_prior <- mu_prior1[1:ns, 1:nt]  
+conf_prior <- mu_prior1[1:ns, 1:nt]   
+k <- k1[1:ns, 1:nt]   
+time <- time1[1:ns]
+
+data <- list(k=k, mu_prior=mu_prior, ai_pred=ai_pred, conf_prior=conf_prior, 
+             time=time, ns=ns, nt=nt)
+
+myinits <- list(
+list(alpha_mu=0, alpha_sigma=2, alpha=rep(0, ns), beta1_mu=0, beta1_sigma=2, beta1=rep(0, ns)),
+list(alpha_mu=0, alpha_sigma=2, alpha=rep(0, ns), beta1_mu=0, beta1_sigma=2, beta1=rep(0, ns)),
+list(alpha_mu=0, alpha_sigma=2, alpha=rep(0, ns), beta1_mu=0, beta1_sigma=2, beta1=rep(0, ns)),
+list(alpha_mu=0, alpha_sigma=2, alpha=rep(0, ns), beta1_mu=0, beta1_sigma=2, beta1=rep(0, ns))
+)
+
+# myinits <- list(
+#   list(alpha_mu=0, alpha_sigma=2, alpha=rep(0, ns),
+#        beta1_mu=0, beta1_sigma=2, beta1=rep(0, ns)))
+
+parameters <- c("alpha", "alpha_mu", "alpha_sigma", 
+                "beta1", "beta1_mu", "beta1_sigma", 
+                "beta2", "beta2_mu", "beta2_sigma", 
+                "sigma_prior", "sigma_prior_mu", "sigma_prior_sigma",
+                "sd_prior", "sd_post", "m_post", "infl") 
+
+samples <- stan(model_code=model,   
+                data=data, 
+                init=myinits, 
+                pars=parameters,
+                iter=5000, 
+                chains=4, 
+                thin=1,
+                # warmup = 100,  
+                seed = 123  
+)
+```
+
+```{r}
+m_post <- extract(samples)$m_post
+colMeans(m_post)[,2]
+```
+
+
+```{r}
+model1_mean <- colMeans(m_post)[,1]
+model2_mean <- colMeans(m_post)[,2]
+model3_mean <- colMeans(m_post)[,3]
+model4_mean <- colMeans(m_post)[,4]
+```
+
+```{r}
+cor(k[,1], model1_mean)
+cor(k[,2], model2_mean)
+cor(k[,3], model3_mean)
+cor(k[,4], model4_mean)
+```
+
+
+```{r}
+label1 = paste("Correlation Coefficient = ", format(cor(k[,1], model1_mean), digits = 2))
+label2 = paste("Correlation Coefficient = ", format(cor(k[,2], model2_mean), digits = 2))
+label3 = paste("Correlation Coefficient = ", format(cor(k[,3], model3_mean), digits = 2))
+label4 = paste("Correlation Coefficient = ", format(cor(k[,4], model4_mean), digits = 2))
+
+jpeg(file="F1_m.png", width=750, height=750)
+plot(k[,1], model1_mean, pch=16, col = "blue",
+     main="P(Ravens beat Steelers)", sub=label1,
+     xlab="", ylab="",
+     cex.lab=3, cex.axis=3, cex.main=4, 
+     cex.sub=3, 
+     cex = 3
+  )
+dev.off()
+jpeg(file="F2_m.png", width=750, height=750)
+plot(k[,2], model2_mean, pch=16, col = "blue",
+     main="P(Bengals beat Browns)", sub=label2,
+     xlab="", ylab="",
+     cex.lab=3, cex.axis=3, cex.main=4, 
+     cex.sub=3, 
+     cex = 3
+  )
+dev.off()
+jpeg(file="F3_m.png", width=750, height=750)
+plot(k[,3], model3_mean, pch=16, col = "blue",
+     main="P(Cowboys beat Texans)", sub=label3,
+     xlab="", ylab="",
+     cex.lab=3, cex.axis=3, cex.main=4, 
+     cex.sub=3, 
+     cex = 3
+  )
+dev.off()
+jpeg(file="F4_m.png", width=750, height=750)
+plot(k[,4], model4_mean, pch=16, col = "blue",
+     main="P(Jaguars beat Titans)", sub=label4,
+     xlab="", ylab="",
+     cex.lab=3, cex.axis=3, cex.main=4, 
+     cex.sub=3, 
+     cex = 3
+  )
+dev.off()
+```
+
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Cmd+Option+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Cmd+Shift+K* to preview the HTML file). 
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
+
